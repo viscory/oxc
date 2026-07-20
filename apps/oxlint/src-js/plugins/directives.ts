@@ -40,8 +40,13 @@ export function getDisableDirectives() {
   const problems: Problem[] = [];
   const directives: Directive[] = [];
 
-  getAllComments().forEach((comment) => {
-    if (comment.type === "Shebang") return;
+  const comments = getAllComments();
+
+  // Skip `Shebang` comment
+  let i = comments.length > 0 && comments[0].type === "Shebang" ? 1 : 0;
+
+  for (; i < comments.length; i++) {
+    const comment = comments[i];
 
     let match = LABEL_PATTERN.exec(comment.value);
     if (!match?.groups?.label) return;
@@ -78,7 +83,7 @@ export function getDisableDirectives() {
       value,
       justification,
     });
-  });
+  }
 
   return { problems, directives };
 }
