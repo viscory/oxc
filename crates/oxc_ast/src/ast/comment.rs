@@ -97,6 +97,10 @@ pub enum CommentContent {
     /// e.g. `/* turbopackOptional: true */`
     /// <https://nextjs.org/docs/app/guides/lazy-loading#turbopackoptional-turbopack-only>
     Turbopack = 10,
+
+    /// File-level Code Coverage Ignore
+    /// `v8 ignore file`, `istanbul ignore file`
+    CoverageIgnoreFile = 11,
 }
 
 bitflags! {
@@ -291,7 +295,14 @@ impl Comment {
     /// Is coverage ignore comment.
     #[inline]
     pub fn is_coverage_ignore(self) -> bool {
-        self.content == CommentContent::CoverageIgnore && self.is_leading()
+        matches!(self.content, CommentContent::CoverageIgnore | CommentContent::CoverageIgnoreFile)
+            && self.is_leading()
+    }
+
+    /// Is a file-level coverage ignore comment.
+    #[inline]
+    pub fn is_coverage_ignore_file(self) -> bool {
+        self.content == CommentContent::CoverageIgnoreFile && self.is_leading()
     }
 
     /// Returns `true` if this comment is preceded by a newline.

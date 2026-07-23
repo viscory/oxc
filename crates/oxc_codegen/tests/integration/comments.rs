@@ -354,7 +354,65 @@ export type TSTypeLiteral = {
 }
 
 pub mod coverage {
+    use oxc_allocator::Allocator;
+    use oxc_codegen::Codegen;
+    use oxc_parser::Parser;
+    use oxc_span::SourceType;
+
     use crate::snapshot;
+
+    fn codegen_after_removing_first_statement(source_text: &str) -> String {
+        let allocator = Allocator::default();
+        let ret = Parser::new(&allocator, source_text, SourceType::ts()).parse();
+        assert!(ret.diagnostics.is_empty());
+        let mut program = ret.program;
+        program.body.remove(0);
+        Codegen::new().build(&program).code
+    }
+
+    #[test]
+    fn preserve_file_coverage_comment_when_anchor_is_removed() {
+        // https://github.com/oxc-project/oxc/issues/23667
+        for comment in [
+            "/* v8 ignore file */",
+            "// v8 ignore file",
+            "/* v8 ignore file -- @preserve */",
+            "/* istanbul ignore file */",
+            "// istanbul ignore file -- generated",
+        ] {
+            let source_text =
+                format!("{comment}\nimport type {{ Foo }} from './types';\nexport default {{}};");
+            assert_eq!(
+                codegen_after_removing_first_statement(&source_text),
+                format!("{comment}\nexport default {{}};\n")
+            );
+        }
+    }
+
+    #[test]
+    fn preserve_file_coverage_comment_when_only_anchor_is_removed() {
+        for comment in ["/* v8 ignore file */", "// istanbul ignore file -- generated"] {
+            let source_text = format!("{comment}\nconst removed = 1;");
+            assert_eq!(
+                codegen_after_removing_first_statement(&source_text),
+                format!("{comment}\n")
+            );
+        }
+    }
+
+    #[test]
+    fn do_not_preserve_non_file_coverage_comment_when_anchor_is_removed() {
+        for comment in [
+            "/* v8 ignore next */",
+            "/* v8 ignore filename */",
+            "/* c8 ignore next */",
+            "/* istanbul ignore next */",
+            "/* node:coverage disable */",
+        ] {
+            let source_text = format!("{comment}\nconst removed = 1;\nsurvivor();");
+            assert_eq!(codegen_after_removing_first_statement(&source_text), "survivor();\n");
+        }
+    }
 
     #[test]
     fn comment() {
