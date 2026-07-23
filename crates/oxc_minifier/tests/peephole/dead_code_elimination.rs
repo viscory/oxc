@@ -1056,3 +1056,26 @@ fn dce_keeps_implicitly_observable_bindings() {
         options,
     );
 }
+
+// https://github.com/oxc-project/oxc/issues/23866
+#[test]
+fn dce_drops_dead_trailing_function_arguments() {
+    test(
+        "const foo = async (assets) => ({}); export default await foo({ bar: 'baz' })",
+        "const foo = async (assets) => ({}); export default await foo()",
+    );
+
+    // Dropping the argument also removes a nested dynamic import that would
+    // otherwise keep an unnecessary chunk alive in Rolldown.
+    test(
+        "const foo = async (assets) => ({}); export default await foo({ image: () => import('./image.js') })",
+        "const foo = async (assets) => ({}); export default await foo()",
+    );
+}
+
+#[test]
+fn dce_keeps_observable_trailing_function_arguments() {
+    test_same("const foo = (unused) => bar(); foo(sideEffect())");
+    test_same("let foo = (unused) => bar(); foo(1); foo = replacement");
+    test_same("const foo = (unused) => eval(\"unused\"); consume(foo(1))");
+}

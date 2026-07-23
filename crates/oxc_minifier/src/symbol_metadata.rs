@@ -1,3 +1,5 @@
+use std::num::NonZeroU32;
+
 /// What the minifier has proved about calls to a locally declared function.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum FunctionSummary {
@@ -55,14 +57,19 @@ impl MemberWriteEffect {
 /// Metadata that remains valid across peephole iterations for one symbol.
 ///
 /// Function summaries may be replaced when a later pass proves more about the
-/// declaration. Member-write effects are monotone: they are seeded before the
-/// fixed-point loop, strengthened when a transform creates a hazard, and never
-/// downgraded. A stale stronger effect only forgoes an optimization, but a
-/// missing effect is unsound. Seeding must therefore complete before the loop,
-/// and creation sites must record stronger effects eagerly.
+/// declaration. Dead-argument prefixes can move earlier as parameter references
+/// disappear and request another pass when they do. Member-write effects are
+/// monotone: they are seeded before the fixed-point loop, strengthened when a
+/// transform creates a hazard, and never downgraded. A stale stronger effect
+/// only forgoes an optimization, but a missing effect is unsound. Seeding must
+/// therefore complete before the loop, and creation sites must record stronger
+/// effects eagerly.
 #[derive(Debug, Default)]
 pub struct PersistentSymbolMetadata {
     function_summary: FunctionSummary,
+    // Stored as `prefix + 1` so `None` remains a niche and this field stays 4
+    // bytes. Parameter counts fit in `u32` because source spans use `u32`.
+    dead_argument_prefix: Option<NonZeroU32>,
     member_write_effect: MemberWriteEffect,
 }
 
@@ -75,6 +82,24 @@ impl PersistentSymbolMetadata {
     #[inline]
     pub fn function_summary(&self) -> FunctionSummary {
         self.function_summary
+    }
+
+    #[inline]
+    pub fn set_dead_argument_prefix(&mut self, prefix: usize) {
+        let prefix = u32::try_from(prefix).expect("function parameter count must fit in u32");
+        let encoded =
+            prefix.checked_add(1).expect("function parameter count must be below u32::MAX");
+        self.dead_argument_prefix = NonZeroU32::new(encoded);
+    }
+
+    #[inline]
+    pub fn clear_dead_argument_prefix(&mut self) {
+        self.dead_argument_prefix = None;
+    }
+
+    #[inline]
+    pub fn dead_argument_prefix(&self) -> Option<usize> {
+        self.dead_argument_prefix.map(|prefix| (prefix.get() - 1) as usize)
     }
 
     #[inline]

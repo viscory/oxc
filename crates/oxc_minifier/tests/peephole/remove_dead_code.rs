@@ -358,3 +358,142 @@ fn non_redeclared_pure_function_still_folds() {
         &default_options(),
     );
 }
+
+// https://github.com/oxc-project/oxc/issues/23866
+#[test]
+fn drop_dead_trailing_function_arguments() {
+    test(
+        "const foo = async (assets) => ({}); export default await foo({ bar: 'baz' })",
+        "const foo = async (assets) => ({}); export default await foo()",
+    );
+
+    test(
+        "const foo = (unused) => { bar() }; foo(1); foo(2)",
+        "const foo = (unused) => { bar() }; foo(), foo()",
+    );
+}
+
+#[test]
+fn keep_observable_trailing_function_arguments() {
+    test(
+        "const foo = (unused) => { bar() }; foo(sideEffect()); foo(1)",
+        "const foo = (unused) => { bar() }; foo(sideEffect()), foo()",
+    );
+    test(
+        "let foo = (unused) => { bar() }; foo(1); foo = replacement",
+        "let foo = (unused) => { bar() }; foo(1), foo = replacement",
+    );
+}
+
+#[test]
+fn drop_dead_trailing_arguments_from_known_function_shapes() {
+    test(
+        "const foo = (a) => { bar(a) }; foo(1, 2, 3); foo(4)",
+        "const foo = (a) => { bar(a) }; foo(1), foo(4)",
+    );
+    test(
+        "const foo = () => { bar() }; foo(1, 2); foo(3)",
+        "const foo = () => { bar() }; foo(), foo()",
+    );
+    test(
+        "const foo = function* (unused) { yield bar() }; foo(1).next(); foo(2).next()",
+        "const foo = function* (unused) { yield bar() }; foo().next(), foo().next()",
+    );
+    test(
+        "const foo = (unused) => function() { return arguments.length }; consume(foo(1)); consume(foo(2))",
+        "const foo = (unused) => function() { return arguments.length }; consume(foo()), consume(foo())",
+    );
+    test(
+        "function outer() { const foo = (unused) => arguments.length; return foo(1) + foo(2) }",
+        "function outer() { let foo = (unused) => arguments.length; return foo() + foo() }",
+    );
+}
+
+#[test]
+fn drop_dead_trailing_arguments_updates_references_and_facts() {
+    test_unused(
+        "const foo = (unused) => { bar() }; const value = 1; foo(value); foo(value)",
+        "const foo = (unused) => { bar() }; foo(), foo()",
+    );
+    test(
+        "if (0) dead(); foo(1); function foo(unused) { bar() }",
+        "foo(); function foo(unused) { bar() }",
+    );
+    test(
+        "if (0) dead(); foo(1, 2); function foo(a, unused) { inner(a, unused) } function inner(a, ignored) { bar(a) }",
+        "foo(1); function foo(a, unused) { inner(a) } function inner(a, ignored) { bar(a) }",
+    );
+    test(
+        "const foo = (unused) => { bar() }; export { foo }; foo(1); foo(2)",
+        "const foo = (unused) => { bar() }; export { foo }; foo(), foo()",
+    );
+}
+
+#[test]
+fn keep_arguments_when_parameter_or_call_semantics_are_observable() {
+    test(
+        "const foo = (a, b) => { bar(b) }; foo(1, 2); foo(3, 4)",
+        "const foo = (a, b) => { bar(b) }; foo(1, 2), foo(3, 4)",
+    );
+    test(
+        "const foo = (unused = sideEffect()) => { bar() }; foo(1); foo(2)",
+        "const foo = (unused = sideEffect()) => { bar() }; foo(1), foo(2)",
+    );
+    test(
+        "const foo = ({ unused }) => { bar() }; foo(x); foo(y)",
+        "const foo = ({ unused }) => { bar() }; foo(x), foo(y)",
+    );
+    test(
+        "const foo = (...args) => { console.log(args) }; foo(1); foo(2)",
+        "const foo = (...args) => { console.log(args) }; foo(1), foo(2)",
+    );
+    test(
+        "const foo = function(unused) { return arguments.length }; consume(foo(1)); consume(foo(1, 2))",
+        "const foo = function(unused) { return arguments.length }; consume(foo(1)), consume(foo(1, 2))",
+    );
+    test(
+        "const foo = (a, b) => { console.log(a) }; foo(...xs, 1); foo(...xs, 2)",
+        "const foo = (a, b) => { console.log(a) }; foo(...xs, 1), foo(...xs, 2)",
+    );
+    test(
+        "const foo = (unused) => { bar() }; foo(...xs); foo(...ys)",
+        "const foo = (unused) => { bar() }; foo(...xs), foo(...ys)",
+    );
+    test(
+        "const foo = (unused) => { bar() }; foo(1); foo(2); eval('replacement')",
+        "const foo = (unused) => { bar() }; foo(1), foo(2), eval('replacement')",
+    );
+    test_same("const foo = (unused) => eval('unused'); consume(foo(1))");
+}
+
+#[test]
+fn keep_arguments_for_dynamic_or_legacy_bindings() {
+    test_same_options_source_type(
+        "function foo(unused) { bar() } foo(1)",
+        SourceType::script(),
+        &default_options(),
+    );
+    test_same_options_source_type(
+        "function outer() { function foo(unused) { var arguments; return arguments } return consume(foo(1)) + consume(foo(1, 2)) } outer()",
+        SourceType::cjs().with_script(true),
+        &default_options(),
+    );
+    test_options_source_type(
+        "function outer(object) { const foo = (unused) => bar(); with (object) foo(1) } outer(source)",
+        "function outer(object) { let foo = (unused) => bar(); with (object) foo(1) } outer(source)",
+        SourceType::cjs().with_script(true),
+        &default_options(),
+    );
+}
+
+#[test]
+fn keep_dead_argument_effects_before_derived_constructor_super() {
+    test(
+        "class Base {} class Derived extends Base { constructor() { const foo = (unused) => bar(); foo(this); super() } } consume(new Derived())",
+        "class Base {} class Derived extends Base { constructor() { ((unused) => bar())(this), super() } } consume(new Derived())",
+    );
+    test(
+        "class Base {} class Derived extends Base { constructor() { const foo = (unused) => bar(); foo((0, this)); super() } } consume(new Derived())",
+        "class Base {} class Derived extends Base { constructor() { ((unused) => bar())(this), super() } } consume(new Derived())",
+    );
+}

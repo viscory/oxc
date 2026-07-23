@@ -4,6 +4,7 @@ use oxc_ast::ast::*;
 use oxc_ast_visit::VisitJs;
 use oxc_ecmascript::{constant_evaluation::ConstantEvaluation, side_effects::MayHaveSideEffects};
 use oxc_span::GetSpan;
+use oxc_syntax::scope::{ScopeFlags, ScopeId};
 
 use crate::{TraverseCtx, keep_var::KeepVar, symbol_metadata::FunctionSummary};
 
@@ -425,16 +426,17 @@ impl<'a> PeepholeOptimizations {
         }
     }
 
-    pub fn keep_track_of_pure_functions(stmt: &mut Statement<'a>, ctx: &mut TraverseCtx<'a>) {
+    pub fn keep_track_of_function_summaries(stmt: &mut Statement<'a>, ctx: &mut TraverseCtx<'a>) {
         match stmt {
             Statement::FunctionDeclaration(f) => {
                 if let Some(body) = &f.body {
-                    Self::try_save_pure_function(
+                    Self::try_save_function_summary(
                         f.id.as_ref(),
                         &f.params,
                         body,
                         f.r#async,
                         f.generator,
+                        f.scope_id.get(),
                         ctx,
                     );
                 }
@@ -444,23 +446,25 @@ impl<'a> PeepholeOptimizations {
                     if let BindingPattern::BindingIdentifier(id) = &d.id {
                         match &d.init {
                             Some(Expression::ArrowFunctionExpression(a)) => {
-                                Self::try_save_pure_function(
+                                Self::try_save_function_summary(
                                     Some(id),
                                     &a.params,
                                     &a.body,
                                     a.r#async,
                                     false,
+                                    a.scope_id.get(),
                                     ctx,
                                 );
                             }
                             Some(Expression::FunctionExpression(f)) => {
                                 if let Some(body) = &f.body {
-                                    Self::try_save_pure_function(
+                                    Self::try_save_function_summary(
                                         Some(id),
                                         &f.params,
                                         body,
                                         f.r#async,
                                         f.generator,
+                                        f.scope_id.get(),
                                         ctx,
                                     );
                                 }
@@ -474,30 +478,15 @@ impl<'a> PeepholeOptimizations {
         }
     }
 
-    fn try_save_pure_function(
+    fn try_save_function_summary(
         id: Option<&BindingIdentifier<'a>>,
         params: &FormalParameters<'a>,
         body: &FunctionBody<'a>,
         r#async: bool,
         generator: bool,
+        function_scope_id: Option<ScopeId>,
         ctx: &mut TraverseCtx<'a>,
     ) {
-        if r#async || generator {
-            return;
-        }
-        // Destructuring can throw. Default initializers run for missing or `undefined`
-        // arguments, and function summaries are call-independent, so reject an initializer
-        // that may have side effects. TDZ-only throws follow the minifier's documented
-        // `No TDZ Violation` assumption.
-        if !params.items.iter().all(|param| {
-            param.pattern.is_binding_identifier()
-                && param.initializer.as_ref().is_none_or(|init| !init.may_have_side_effects(ctx))
-        }) {
-            return;
-        }
-        if body.statements.iter().any(|stmt| stmt.may_have_side_effects(ctx)) {
-            return;
-        }
         let Some(symbol_id) = id.and_then(|id| id.symbol_id.get()) else { return };
         let binding_scope_id = ctx.scoping().symbol_scope_id(symbol_id);
         let binding_scope_flags = ctx.scoping().scope_flags(binding_scope_id);
@@ -506,6 +495,9 @@ impl<'a> PeepholeOptimizations {
         // declaration of the same symbol may be impure and win at runtime.
         if !ctx.scoping().symbol_redeclarations(symbol_id).is_empty() {
             ctx.state.symbols.clear_function_summary(symbol_id);
+            if ctx.state.symbols.clear_dead_argument_prefix(symbol_id) {
+                ctx.state.request_revisit();
+            }
             return;
         }
         // Direct eval and Script global properties can replace the binding
@@ -516,37 +508,135 @@ impl<'a> PeepholeOptimizations {
             || (ctx.source_type().is_script() && binding_scope_id == ctx.scoping().root_scope_id())
         {
             ctx.state.symbols.clear_function_summary(symbol_id);
+            if ctx.state.symbols.clear_dead_argument_prefix(symbol_id) {
+                ctx.state.request_revisit();
+            }
             return;
         }
-        if ctx.scoping().get_resolved_references(symbol_id).all(|r| r.flags().is_read_only()) {
-            ctx.state.symbols.set_function_summary(
-                symbol_id,
-                if body.is_empty() {
-                    FunctionSummary::SideEffectFreeReturnsUndefined
-                } else {
-                    FunctionSummary::SideEffectFree
-                },
-            );
+
+        if !ctx.scoping().get_resolved_references(symbol_id).all(|r| r.flags().is_read_only()) {
+            ctx.state.symbols.clear_function_summary(symbol_id);
+            if ctx.state.symbols.clear_dead_argument_prefix(symbol_id) {
+                ctx.state.request_revisit();
+            }
+            return;
         }
+
+        // Preserve the existing call-purity proof, including support for pure
+        // parameter defaults. Dead-argument analysis below is independent and
+        // deliberately applies to async, generator, and effectful functions.
+        let pure_params = params.items.iter().all(|param| {
+            param.pattern.is_binding_identifier()
+                && param.initializer.as_ref().is_none_or(|init| !init.may_have_side_effects(ctx))
+        });
+        if !r#async
+            && !generator
+            && pure_params
+            && !body.statements.iter().any(|stmt| stmt.may_have_side_effects(ctx))
+        {
+            let summary = if body.is_empty() {
+                FunctionSummary::SideEffectFreeReturnsUndefined
+            } else {
+                FunctionSummary::SideEffectFree
+            };
+            ctx.state.symbols.set_function_summary(symbol_id, summary);
+        } else {
+            ctx.state.symbols.clear_function_summary(symbol_id);
+        }
+
+        if let Some(prefix) = Self::compute_dead_argument_prefix(params, function_scope_id, ctx) {
+            if ctx.state.symbols.set_dead_argument_prefix(symbol_id, prefix) {
+                ctx.state.request_revisit();
+            }
+        } else if ctx.state.symbols.clear_dead_argument_prefix(symbol_id) {
+            ctx.state.request_revisit();
+        }
+    }
+
+    /// Return the first argument index whose value the function cannot observe.
+    /// Arguments at and after this index may be removed when their evaluation is
+    /// also unobservable.
+    fn compute_dead_argument_prefix(
+        params: &FormalParameters<'a>,
+        function_scope_id: Option<ScopeId>,
+        ctx: &TraverseCtx<'a>,
+    ) -> Option<usize> {
+        if params.rest.is_some()
+            || !params
+                .items
+                .iter()
+                .all(|param| param.pattern.is_binding_identifier() && param.initializer.is_none())
+        {
+            return None;
+        }
+
+        let function_scope_id = function_scope_id?;
+        let function_scope_flags = ctx.scoping().scope_flags(function_scope_id);
+        if !function_scope_flags.is_arrow()
+            && (!function_scope_flags.is_strict_mode()
+                || ctx.scoping().root_unresolved_references().contains_key("arguments"))
+        {
+            return None;
+        }
+
+        let mut prefix = params.items.len();
+        while prefix > 0 {
+            let BindingPattern::BindingIdentifier(id) = &params.items[prefix - 1].pattern else {
+                break;
+            };
+            let Some(symbol_id) = id.symbol_id.get() else { break };
+            if !ctx.scoping().symbol_is_unused(symbol_id) {
+                break;
+            }
+            prefix -= 1;
+        }
+        Some(prefix)
     }
 
     pub fn remove_dead_code_call_expression(expr: &mut Expression<'a>, ctx: &mut TraverseCtx<'a>) {
         let Expression::CallExpression(e) = expr else { return };
-        if let Expression::Identifier(ident) = &e.callee {
-            let reference_id = ident.reference_id();
-            if let Some(symbol_id) = ctx.scoping().get_reference(reference_id).symbol_id()
-                && ctx.state.symbols.function_summary(symbol_id).returns_undefined()
-            {
-                let mut exprs = Self::fold_arguments_into_needed_expressions(&mut e.arguments, ctx);
-                if exprs.is_empty() {
-                    let new_expr = Expression::new_void_0(e.span, ctx);
-                    ctx.replace_expression(expr, new_expr);
-                    return;
-                }
-                exprs.push(Expression::new_void_0(e.span, ctx));
-                let new_expr = Expression::new_sequence_expression(e.span, exprs, ctx);
+        let Expression::Identifier(ident) = &e.callee else { return };
+        let reference_id = ident.reference_id();
+        let reference = ctx.scoping().get_reference(reference_id);
+        let Some(symbol_id) = reference.symbol_id() else { return };
+
+        if ctx.state.symbols.function_summary(symbol_id).returns_undefined() {
+            let mut exprs = Self::fold_arguments_into_needed_expressions(&mut e.arguments, ctx);
+            if exprs.is_empty() {
+                let new_expr = Expression::new_void_0(e.span, ctx);
                 ctx.replace_expression(expr, new_expr);
+                return;
             }
+            exprs.push(Expression::new_void_0(e.span, ctx));
+            let new_expr = Expression::new_sequence_expression(e.span, exprs, ctx);
+            ctx.replace_expression(expr, new_expr);
+            return;
+        }
+
+        let Some(prefix) = ctx.state.symbols.dead_argument_prefix(symbol_id) else { return };
+        if e.arguments.len() <= prefix
+            || e.arguments.iter().any(|argument| matches!(argument, Argument::SpreadElement(_)))
+            // A `with` object can dynamically replace the statically resolved
+            // identifier with a different function that observes its arguments.
+            || ctx.scoping().scope_ancestors(reference.scope_id()).any(|scope_id| {
+                ctx.scoping().scope_flags(scope_id).contains(ScopeFlags::With)
+            })
+        {
+            return;
+        }
+
+        while e.arguments.len() > prefix {
+            let Some(argument) = e.arguments.last_mut().and_then(Argument::as_expression_mut)
+            else {
+                return;
+            };
+            // Reuse unused-expression analysis so hidden effects and derived-
+            // constructor `this` before `super()` remain observable.
+            if !Self::remove_unused_expression(argument, ctx) {
+                break;
+            }
+            let dropped = e.arguments.pop().unwrap().into_expression();
+            ctx.drop_expression(&dropped);
         }
     }
 

@@ -1,5 +1,7 @@
 //! Minifier-owned symbol data, grouped by storage lifetime and density.
 
+use std::collections::hash_map::Entry;
+
 use rustc_hash::FxHashMap;
 
 use oxc_allocator::Allocator;
@@ -82,6 +84,36 @@ impl<'a> SymbolState<'a> {
         self.persistent
             .get(&symbol_id)
             .map_or(FunctionSummary::Unknown, PersistentSymbolMetadata::function_summary)
+    }
+
+    /// Record the first argument index whose value the function cannot observe.
+    /// Returns `true` when an existing fact became stronger and needs another
+    /// traversal so earlier call sites can consume it.
+    pub fn set_dead_argument_prefix(&mut self, symbol_id: SymbolId, prefix: usize) -> bool {
+        match self.persistent.entry(symbol_id) {
+            Entry::Occupied(mut entry) => {
+                let previous = entry.get().dead_argument_prefix();
+                entry.get_mut().set_dead_argument_prefix(prefix);
+                previous.is_some_and(|previous| previous != prefix)
+            }
+            Entry::Vacant(entry) => {
+                let mut metadata = PersistentSymbolMetadata::default();
+                metadata.set_dead_argument_prefix(prefix);
+                entry.insert(metadata);
+                false
+            }
+        }
+    }
+
+    pub fn clear_dead_argument_prefix(&mut self, symbol_id: SymbolId) -> bool {
+        let Some(metadata) = self.persistent.get_mut(&symbol_id) else { return false };
+        let had_prefix = metadata.dead_argument_prefix().is_some();
+        metadata.clear_dead_argument_prefix();
+        had_prefix
+    }
+
+    pub fn dead_argument_prefix(&self, symbol_id: SymbolId) -> Option<usize> {
+        self.persistent.get(&symbol_id)?.dead_argument_prefix()
     }
 
     pub fn record_member_write_effect(&mut self, symbol_id: SymbolId, effect: MemberWriteEffect) {

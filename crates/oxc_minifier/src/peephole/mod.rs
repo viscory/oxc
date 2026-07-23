@@ -361,7 +361,7 @@ impl<'a> Traverse<'a> for PeepholeOptimizations {
     }
 
     fn enter_statement(&mut self, stmt: &mut Statement<'a>, ctx: &mut TraverseCtx<'a>) {
-        Self::keep_track_of_pure_functions(stmt, ctx);
+        Self::keep_track_of_function_summaries(stmt, ctx);
     }
 
     fn exit_statement(&mut self, stmt: &mut Statement<'a>, ctx: &mut TraverseCtx<'a>) {
