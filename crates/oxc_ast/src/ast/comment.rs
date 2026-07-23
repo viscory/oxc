@@ -98,8 +98,11 @@ pub enum CommentContent {
     /// <https://nextjs.org/docs/app/guides/lazy-loading#turbopackoptional-turbopack-only>
     Turbopack = 10,
 
-    /// File-level Code Coverage Ignore
-    /// `v8 ignore file`, `istanbul ignore file`
+    /// File-level code coverage ignore.
+    ///
+    /// `v8 ignore file`, `istanbul ignore file`.
+    /// Classified separately because its meaning remains valid if the next AST
+    /// node is removed, unlike position-sensitive coverage annotations.
     CoverageIgnoreFile = 11,
 }
 

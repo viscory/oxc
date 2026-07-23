@@ -355,19 +355,26 @@ export type TSTypeLiteral = {
 
 pub mod coverage {
     use oxc_allocator::Allocator;
-    use oxc_codegen::Codegen;
+    use oxc_codegen::{Codegen, CodegenOptions, CommentOptions};
     use oxc_parser::Parser;
     use oxc_span::SourceType;
 
     use crate::snapshot;
 
     fn codegen_after_removing_first_statement(source_text: &str) -> String {
+        codegen_after_removing_first_statement_with_options(source_text, CodegenOptions::default())
+    }
+
+    fn codegen_after_removing_first_statement_with_options(
+        source_text: &str,
+        options: CodegenOptions,
+    ) -> String {
         let allocator = Allocator::default();
         let ret = Parser::new(&allocator, source_text, SourceType::ts()).parse();
         assert!(ret.diagnostics.is_empty());
         let mut program = ret.program;
         program.body.remove(0);
-        Codegen::new().build(&program).code
+        Codegen::new().with_options(options).build(&program).code
     }
 
     #[test]
@@ -398,6 +405,29 @@ pub mod coverage {
                 format!("{comment}\n")
             );
         }
+    }
+
+    #[test]
+    fn preserve_file_coverage_comment_after_hashbang_when_anchor_is_removed() {
+        let source_text =
+            "#!/usr/bin/env node\n/* v8 ignore file */\nconst removed = 1;\nsurvivor();";
+        assert_eq!(
+            codegen_after_removing_first_statement(source_text),
+            "#!/usr/bin/env node\n/* v8 ignore file */\nsurvivor();\n"
+        );
+    }
+
+    #[test]
+    fn respect_disabled_annotation_comments_when_anchor_is_removed() {
+        let source_text = "/* v8 ignore file */\nconst removed = 1;\nsurvivor();";
+        let options = CodegenOptions {
+            comments: CommentOptions { annotation: false, ..CommentOptions::default() },
+            ..CodegenOptions::default()
+        };
+        assert_eq!(
+            codegen_after_removing_first_statement_with_options(source_text, options),
+            "survivor();\n"
+        );
     }
 
     #[test]

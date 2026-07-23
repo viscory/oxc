@@ -6,6 +6,8 @@ use crate::test_with_source_type;
 #[test]
 fn preserve_file_coverage_comment_when_typescript_import_is_removed() {
     // https://github.com/oxc-project/oxc/issues/23667
+    // Transform conformance clears comments before codegen, so this cross-cutting
+    // parser + transformer + codegen behavior needs the integration harness.
     let cases = [
         (
             "/* v8 ignore file */\nimport unusedDefault, { unusedNamed } from './side-effects';\nexport default {};",
